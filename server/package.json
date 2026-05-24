@@ -1,0 +1,21 @@
+{
+  "name": "dubsync-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@clerk/express": "latest",
+    "axios": "latest",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "fluent-ffmpeg": "latest",
+    "multer": "latest",
+    "node-cron": "^4.2.1",
+    "openai": "latest"
+  }
+}

@@ -1,0 +1,30 @@
+.DS_Store
+
+# Dependencies
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# Builds
+client/dist/
+dist/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!client/.env.example
+!server/.env.example
+
+# Runtime data
+server/tmp/
+server/projects/
+*.log
+
+# macOS launcher artifacts
+*.command~
+
+# Archives
+*.tgz
+*.tar.gz
+*.zip
