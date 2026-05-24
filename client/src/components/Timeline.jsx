@@ -55,7 +55,9 @@ export default function Timeline({
   const segmentsRef = useRef([]);
   const onSegmentsChangeRef = useRef(onSegmentsChange);
   const previewAudioRef = useRef(null);
-  const mixRef = useRef({ audios: [], rafId: null, timeouts: [] });
+  const audioContextRef = useRef(null);
+  const mixRef = useRef({ audios: [], rafId: null, sources: [], timeouts: [] });
+  const ttsBufferCacheRef = useRef(new Map());
   const ttsUrlCacheRef = useRef(new Map());
   const videoRef = useRef(null);
   const [segments, setSegments] = useState([]);
@@ -122,6 +124,7 @@ export default function Timeline({
       if (!wantedFilenames.has(filename)) {
         URL.revokeObjectURL(objectUrl);
         ttsUrlCacheRef.current.delete(filename);
+        ttsBufferCacheRef.current.delete(filename);
         setTtsUrls((currentUrls) => {
           const nextUrls = { ...currentUrls };
           delete nextUrls[filename];
@@ -165,6 +168,7 @@ export default function Timeline({
         URL.revokeObjectURL(objectUrl);
       }
       ttsUrlCacheRef.current.clear();
+      ttsBufferCacheRef.current.clear();
       setTtsUrls({});
     },
     [importResult?.jobId]
@@ -276,14 +280,16 @@ export default function Timeline({
     };
   }, [importResult?.jobId]);
 
-  useEffect(() => {
-    waveSurferRef.current?.setVolume(ovVolume / 100);
-    onVolumesChange?.({ volumeDUB: dubVolume, volumeOV: ovVolume });
-  }, [ovVolume]);
+  const changeOvVolume = (value) => {
+    setOvVolume(value);
+    waveSurferRef.current?.setVolume(value / 100);
+    onVolumesChange?.({ volumeDUB: dubVolume, volumeOV: value });
+  };
 
-  useEffect(() => {
-    onVolumesChange?.({ volumeDUB: dubVolume, volumeOV: ovVolume });
-  }, [dubVolume]);
+  const changeDubVolume = (value) => {
+    setDubVolume(value);
+    onVolumesChange?.({ volumeDUB: value, volumeOV: ovVolume });
+  };
 
   const updateSegment = (segmentId, updater) => {
     setSegments((currentSegments) => {
@@ -351,6 +357,7 @@ export default function Timeline({
   const startDrag = (event, segment, mode) => {
     event.preventDefault();
     event.stopPropagation();
+    stopTransport();
     dragRef.current = {
       duration: segment.end - segment.start,
       id: segment.id,
@@ -427,6 +434,21 @@ export default function Timeline({
     waveSurfer.play();
   };
 
+  const seekToTime = (seconds) => {
+    const waveSurfer = waveSurferRef.current;
+
+    if (!waveSurfer || !duration) {
+      return;
+    }
+
+    if (typeof waveSurfer.setTime === "function") {
+      waveSurfer.setTime(seconds);
+      return;
+    }
+
+    waveSurfer.seekTo(clamp(seconds / duration, 0, 1));
+  };
+
   const playSegmentPreview = async (segment) => {
     try {
       const filename = basename(segment.audioFile);
@@ -455,7 +477,14 @@ export default function Timeline({
     mixRef.current.audios.forEach((audio) => {
       audio.pause();
     });
-    mixRef.current = { audios: [], rafId: null, timeouts: [] };
+    mixRef.current.sources.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        // Source nodes may already be stopped.
+      }
+    });
+    mixRef.current = { audios: [], rafId: null, sources: [], timeouts: [] };
   };
 
   const stopTransport = () => {
@@ -475,7 +504,7 @@ export default function Timeline({
     setIsPlaying(false);
   };
 
-  const playMixed = async () => {
+  const playMixed = async (cursorOverride = null) => {
     const currentSegments = segmentsRef.current;
     if (!importResult?.jobId || currentSegments.length === 0) {
       return;
@@ -485,7 +514,9 @@ export default function Timeline({
       stopMixed();
 
       const waveSurfer = waveSurferRef.current;
-      const cursor = waveSurfer?.getCurrentTime() ?? 0;
+      const cursor = Number.isFinite(cursorOverride)
+        ? cursorOverride
+        : waveSurfer?.getCurrentTime() ?? 0;
       const playableSegments = currentSegments.filter(
         (segment) => segment.audioFile && segment.end > cursor
       );
@@ -505,24 +536,45 @@ export default function Timeline({
         return;
       }
 
-      const audioEntries = playableSegments.map((segment) => {
+      const audioContext =
+        audioContextRef.current ?? new AudioContext();
+      audioContextRef.current = audioContext;
+
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+
+      const getAudioBuffer = async (filename, objectUrl) => {
+        if (ttsBufferCacheRef.current.has(filename)) {
+          return ttsBufferCacheRef.current.get(filename);
+        }
+
+        const response = await fetch(objectUrl);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        ttsBufferCacheRef.current.set(filename, audioBuffer);
+        return audioBuffer;
+      };
+
+      const audioEntries = await Promise.all(playableSegments.map(async (segment) => {
         const filename = basename(segment.audioFile);
         const objectUrl = ttsUrls[filename] || ttsUrlCacheRef.current.get(filename);
-        const audio = new Audio(objectUrl);
-        audio.preload = "auto";
-        audio.volume = dubVolume / 100;
+        const audioBuffer = await getAudioBuffer(filename, objectUrl);
         const targetDuration = Math.max(0.25, segment.end - segment.start);
-        const generatedDuration = Number(segment.duration) || targetDuration;
-        audio.playbackRate = clamp(generatedDuration / targetDuration, 0.75, 1.35);
-        audio.load();
+        const generatedDuration =
+          Number(segment.duration) || audioBuffer.duration || targetDuration;
+        const playbackRate = 1;
         return {
-          audio,
+          audioBuffer,
+          generatedDuration,
+          playbackRate,
           segment,
-          startsAfterPlaybackCursor: segment.start >= cursor
+          targetDuration
         };
-      });
+      }));
 
       waveSurfer?.setVolume(ovVolume / 100);
+      seekToTime(cursor);
 
       if (videoRef.current) {
         videoRef.current.currentTime = cursor;
@@ -530,55 +582,47 @@ export default function Timeline({
         videoRef.current.volume = 0;
       }
 
-      mixRef.current.audios = audioEntries.map((entry) => entry.audio);
+      const sources = audioEntries.map((entry) => {
+        const { audioBuffer, segment } = entry;
+        const playbackStartTime = Math.max(cursor, segment.start);
+        const audioOffset = clamp(
+          (playbackStartTime - segment.start) * entry.playbackRate,
+          0,
+          Math.max(0, entry.generatedDuration - 0.02)
+        );
+        const source = audioContext.createBufferSource();
+        const gain = audioContext.createGain();
+        const startDelaySeconds = Math.max(0, segment.start - cursor);
+        const playableTimelineDuration = Math.max(
+          0.05,
+          segment.end - playbackStartTime
+        );
+
+        source.buffer = audioBuffer;
+        source.playbackRate.value = entry.playbackRate;
+        gain.gain.value = dubVolume / 100;
+        source.connect(gain);
+        gain.connect(audioContext.destination);
+        source.start(
+          audioContext.currentTime + startDelaySeconds,
+          audioOffset,
+          playableTimelineDuration
+        );
+        return source;
+      });
+
+      mixRef.current.sources = sources;
       await waveSurfer?.play();
-
-      const scheduleDub = () => {
-        const currentTime = waveSurfer?.getCurrentTime() ?? 0;
-        let hasPendingAudio = false;
-        const startLookAheadSeconds = 0.08;
-
-        audioEntries.forEach((entry) => {
-          const { audio, segment } = entry;
-
-          if (entry.started || entry.scheduled || currentTime >= segment.end) {
-            return;
-          }
-
-          hasPendingAudio = true;
-
-          if (currentTime + startLookAheadSeconds >= segment.start) {
-            entry.scheduled = true;
-            const startDelayMs = Math.max(0, (segment.start - currentTime) * 1000);
-            const startTimeout = window.setTimeout(() => {
-              entry.started = true;
-              audio.currentTime = 0;
-              audio.play().catch(() => {
-                setError("Lecture du doublage bloquée par le navigateur.");
-              });
-            }, startDelayMs);
-            const stopDelayMs =
-              startDelayMs + Math.max(80, (segment.end - segment.start) * 1000);
-            const stopTimeout = window.setTimeout(() => {
-              audio.pause();
-            }, stopDelayMs);
-            mixRef.current.timeouts.push(startTimeout);
-            mixRef.current.timeouts.push(stopTimeout);
-          }
-        });
-
-        if (waveSurfer?.isPlaying() && hasPendingAudio) {
-          mixRef.current.rafId = requestAnimationFrame(scheduleDub);
-          return;
-        }
-
-        mixRef.current.rafId = null;
-      };
-
-      scheduleDub();
     } catch {
       setError("Impossible de lire la piste doublée.");
     }
+  };
+
+  const playSegmentOnTimeline = (segment) => {
+    stopTransport();
+    setPlayMode("mixed");
+    seekToTime(segment.start);
+    playMixed(segment.start);
   };
 
   const toggleTransport = () => {
@@ -742,7 +786,7 @@ export default function Timeline({
             className="mt-2 block w-full accent-teal-300"
             max="100"
             min="0"
-            onChange={(event) => setOvVolume(Number(event.target.value))}
+            onChange={(event) => changeOvVolume(Number(event.target.value))}
             type="range"
             value={ovVolume}
           />
@@ -753,7 +797,7 @@ export default function Timeline({
             className="mt-2 block w-full accent-teal-300"
             max="100"
             min="0"
-            onChange={(event) => setDubVolume(Number(event.target.value))}
+            onChange={(event) => changeDubVolume(Number(event.target.value))}
             type="range"
             value={dubVolume}
           />
@@ -839,11 +883,11 @@ export default function Timeline({
                     onClick={(event) => {
                       event.stopPropagation();
                       setSelectedId(segment.id);
-                      playSegmentPreview(segment);
+                      playSegmentOnTimeline(segment);
                     }}
                     type="button"
                   >
-                    Play
+                    Lire
                   </button>
                   {editingId === segment.id ? (
                     <input

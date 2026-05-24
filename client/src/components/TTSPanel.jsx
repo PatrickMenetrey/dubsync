@@ -55,7 +55,6 @@ export default function TTSPanel({
   const [voices, setVoices] = useState([]);
   const [voiceName, setVoiceName] = useState("");
   const [ttsSegments, setTtsSegments] = useState([]);
-  const [speakingRates, setSpeakingRates] = useState({});
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [busySegmentId, setBusySegmentId] = useState(null);
@@ -225,7 +224,7 @@ export default function TTSPanel({
         url: "/api/tts/generate",
         data: {
           jobId: importResult.jobId,
-          segments: [{ ...segment, speakingRate: speakingRates[segmentId] ?? 1 }],
+          segments: [{ ...segment, speakingRate: 1 }],
           voiceName,
           languageCode: effectiveVoiceLanguage,
           provider: ttsProvider
@@ -368,7 +367,7 @@ export default function TTSPanel({
             </p>
             {ttsSegments.some((s) => s.needsSpeedAdjust) ? (
               <span className="rounded-full bg-amber-300 px-3 py-1 text-xs font-semibold text-zinc-950">
-                Ajustements vitesse recommandés dans la timeline
+                Certains segments dépassent leur durée cible
               </span>
             ) : (
               <span className="rounded-full bg-teal-950 px-3 py-1 text-xs font-semibold text-teal-300 border border-teal-900">

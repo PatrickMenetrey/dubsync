@@ -29,6 +29,11 @@ export async function clerkAuth(request, response, next) {
   const token = getBearerToken(request);
 
   if (!token || !process.env.CLERK_SECRET_KEY) {
+    console.warn("Clerk auth denied", {
+      reason: !token ? "missing_token" : "missing_secret",
+      path: request.path,
+      origin: request.get("origin") ?? null
+    });
     accessDenied(response);
     return;
   }
@@ -47,6 +52,11 @@ export async function clerkAuth(request, response, next) {
     const user = await clerkClient.users.getUser(userId);
 
     if (user.publicMetadata?.approved !== true) {
+      console.warn("Clerk auth denied", {
+        reason: "user_not_approved",
+        path: request.path,
+        userId
+      });
       accessDenied(response);
       return;
     }
@@ -55,7 +65,12 @@ export async function clerkAuth(request, response, next) {
     request.userEmail = getPrimaryEmail(user);
     request.clerkUser = user;
     next();
-  } catch {
+  } catch (error) {
+    console.warn("Clerk auth denied", {
+      reason: "token_verification_failed",
+      path: request.path,
+      message: error?.message ?? "Unknown Clerk error"
+    });
     accessDenied(response);
   }
 }

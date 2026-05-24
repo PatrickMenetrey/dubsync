@@ -1,4 +1,4 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
@@ -15,11 +15,14 @@ import { fileURLToPath } from "node:url";
 import { adminAuth } from "./middleware/adminAuth.js";
 import { clerkAuth } from "./middleware/clerkAuth.js";
 
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const serverRoot = path.resolve(currentDir, "..");
+
+dotenv.config({ path: path.join(serverRoot, ".env") });
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 const port = process.env.PORT || 3001;
-const currentDir = path.dirname(fileURLToPath(import.meta.url));
-const serverRoot = path.resolve(currentDir, "..");
 const tmpRoot = path.join(serverRoot, "tmp");
 const projectsRoot = path.join(serverRoot, "projects");
 const allowedVideoExtensions = new Set([".mp4", ".mov", ".mkv", ".webm"]);
@@ -29,14 +32,22 @@ const exportJobs = new Map();
 const tmpMaxAgeMs = 24 * 60 * 60 * 1000;
 const appPublicUrl = process.env.APP_PUBLIC_URL || "";
 const mailFrom = process.env.MAIL_FROM || "DubSync <onboarding@resend.dev>";
+const allowedOrigins = new Set(
+  [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://83.228.225.134",
+    "https://app.palm-tech.ch",
+    appPublicUrl
+  ].filter(Boolean)
+);
 
 app.use(
   cors({
     origin(origin, callback) {
       if (
         !origin ||
-        origin === "http://localhost:5173" ||
-        origin === "http://127.0.0.1:5173" ||
+        allowedOrigins.has(origin) ||
         origin.endsWith(".trycloudflare.com")
       ) {
         callback(null, true);
@@ -391,6 +402,29 @@ const cutAudioSegment = (audioPath, outputPath, offset, duration) =>
       .run();
   });
 
+const trimLeadingSilence = async (audioPath) => {
+  const parsedPath = path.parse(audioPath);
+  const trimmedPath = path.join(
+    parsedPath.dir,
+    `${parsedPath.name}_trimmed${parsedPath.ext}`
+  );
+
+  await new Promise((resolve, reject) => {
+    ffmpeg(audioPath)
+      .audioFilters(
+        "silenceremove=start_periods=1:start_duration=0.03:start_threshold=-50dB"
+      )
+      .audioCodec("libmp3lame")
+      .outputOptions(["-q:a 2"])
+      .output(trimmedPath)
+      .on("end", resolve)
+      .on("error", reject)
+      .run();
+  });
+
+  await fs.rename(trimmedPath, audioPath);
+};
+
 const getVideoMetadata = (metadata) => {
   const videoStream = metadata.streams.find(
     (stream) => stream.codec_type === "video"
@@ -715,7 +749,7 @@ const createTtsSegment = async ({
   const segmentId = safeSegmentId(segment.id);
   const audioFile = path.join(ttsDir, `segment_${segmentId}.mp3`);
   const sourceDuration = Number(segment.end) - Number(segment.start);
-  const speakingRate = Number(segment.speakingRate ?? 1);
+  const speakingRate = 1;
 
   await fs.mkdir(ttsDir, { recursive: true });
 
@@ -734,6 +768,8 @@ const createTtsSegment = async ({
     });
     await fs.writeFile(audioFile, Buffer.from(audioContent, "base64"));
   }
+
+  await trimLeadingSilence(audioFile);
 
   const duration = await getAudioDuration(audioFile);
   const ratio = sourceDuration > 0 ? duration / sourceDuration : 1;
